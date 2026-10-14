@@ -1,0 +1,102 @@
+networks:
+  canteengo-net:
+    driver: bridge
+
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - menu
+      - order
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - canteengo-net
+
+  menu-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: menu_db
+      POSTGRES_USER: canteengo
+      POSTGRES_PASSWORD: canteengo_password
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "canteengo", "-d", "menu_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - canteengo-net
+
+  menu:
+    build:
+      context: ./services/menu
+    environment:
+      DATABASE_URL: postgresql://canteengo:canteengo_password@menu-db:5432/menu_db
+    depends_on:
+      menu-db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - canteengo-net
+
+  order-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: order_db
+      POSTGRES_USER: canteengo
+      POSTGRES_PASSWORD: canteengo_password
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "canteengo", "-d", "order_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - canteengo-net
+
+  order:
+    build:
+      context: ./services/order
+    environment:
+      DATABASE_URL: postgresql://canteengo:canteengo_password@order-db:5432/order_db
+      MENU_SERVICE_URL: http://menu:8000
+    depends_on:
+      order-db:
+        condition: service_healthy
+      menu:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - canteengo-net
+
+  locust:
+    image: locustio/locust:2.32.0
+    profiles:
+      - loadtest
+    volumes:
+      - ./loadtest:/mnt/locust
+    command: -f /mnt/locust/locustfile.py --host http://gateway:80 --headless -u 20 -r 5 --run-time 1m --csv /mnt/locust/results/stats
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - canteengo-net
